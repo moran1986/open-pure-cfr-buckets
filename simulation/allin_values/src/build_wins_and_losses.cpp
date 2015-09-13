@@ -19,6 +19,15 @@
 
 using namespace std;
 
+// Constants at the top... easier to edit.
+static const int kMaxHandValuesMapSize = 2*10000000;  // 10000000 --> 0.3% of board, card pairs.
+static const float kPercentBoardsVisit = 1.1; // 0.2; // 0.2 // Set to 1.0+ to visit all. Linear impact on runtime. No effect on memory.
+
+// Useful for keeping hand lookups in memory. Maps from full hand (in specific, canonical form, to value (float)
+typedef unordered_map<unsigned long, float> hand_value_map;
+typedef unordered_map<unsigned long, pair<float, long> > hand_average_value_map;
+static const int kNumBuckets = 5;
+
 static void GetIBoard(Card *board, unsigned int num_board_cards, Card min_card,
 		      unsigned int *i_board) {
   vector<unsigned int> v(num_board_cards);
@@ -45,11 +54,6 @@ struct ScoredHandLowerCompare {
   }
 };
 static ScoredHandLowerCompare g_scored_hand_lower_compare;
-
-// Useful for keeping hand lookups in memory. Maps from full hand (in specific, canonical form, to value (float)
-typedef unordered_map<unsigned long, float> hand_value_map;
-typedef unordered_map<unsigned long, pair<float, long> > hand_average_value_map;
-static const int kNumBuckets = 5;
 
 static void ProcessBoardUniform(Card *board, HandTree *hand_tree,
 				unsigned int num_board_cards,
@@ -275,7 +279,7 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
 
   // We want to build a map of <hand_code> to value.
   // See how big and how fast... until we runs out of memory
-  int hand_map_max_size = 10000000; // A hack. If we know size, reserve it right away
+  int hand_map_max_size = kMaxHandValuesMapSize;  // 10000000; // A hack. If we know size, reserve it right away
   //unordered_map <unsigned int, float> hand_map;
   hand_map.reserve(hand_map_max_size); 
 
@@ -283,7 +287,7 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
   srand((unsigned int)time(NULL));
   float include_hand_probability = 1.0 * hand_map_max_size / (num_canon_boards * num_hole_card_pairs);
   printf("Looking to sample %d hand results (limited CPU memory). Will include each result with %.3f%% probability", hand_map_max_size, include_hand_probability * 100.0);
-  for (bd = 0; bd < num_canon_boards && (!debug || bd < max_boards); ++bd) {
+  for (bd = 0; bd < num_canon_boards; ++bd) {
     if (bd % 100000 == 0) {
       clock_t end = clock();
       double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
@@ -378,7 +382,7 @@ static void BucketCutoffsFromCounts(hand_average_value_map& hand_averages, const
 
   // Now iterate through the vector, and pump when we hit a bucket break.
   long running_count = 0;
-  float breaks[num_buckets+1];
+  //float breaks[num_buckets+1];
 
   // To keep overloading... also save buckets. Format: 
   // xxx -- num buckets xxx -- num items (that will be written out)
@@ -400,7 +404,7 @@ static void BucketCutoffsFromCounts(hand_average_value_map& hand_averages, const
     int segment = min((int)((running_count * num_buckets) / total_hands_count + 1), num_buckets);
     OutputTwoCards(hi, lo);
     printf("\t%d/%d - (%.4f, %lu)\n", segment, num_buckets, val, count);
-    breaks[segment] = val;
+    //breaks[segment] = val;
     bucket_cutoffs[segment] = val;
 
     // For each item, write
@@ -415,7 +419,7 @@ static void BucketCutoffsFromCounts(hand_average_value_map& hand_averages, const
     // And update the value in bucket assignments (useful for next level)
     preflop_bucket_assignments[hand_code] = segment;
   }
-  breaks[-1] = 1.0;
+  //breaks[-1] = 1.0;
   bucket_cutoffs[-1] = 1.0;
   //return breaks;
 
@@ -456,7 +460,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   unsigned int bd;
 
   // Hack. Set percentage if we want to skip board to go faster
-  float include_board_probability = 0.2; // set to 1.0 or high, to use all boards
+  float include_board_probability = kPercentBoardsVisit; // 0.2; // set to 1.0 or high, to use all boards
   for (bd = 0; bd < num_canon_boards; ++bd) {
     if (bd % 100000 == 0) {
       clock_t end = clock();
@@ -656,7 +660,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 
   clock_t end = clock();
   double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
-  printf("\nTook %.2f seconds\n", elapsed_secs);
+  printf("\nTook %.2f seconds (for entire looping)\n", elapsed_secs);
 }
 
 
