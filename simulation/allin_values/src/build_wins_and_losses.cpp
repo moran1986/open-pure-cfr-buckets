@@ -20,8 +20,8 @@
 using namespace std;
 
 // Constants at the top... easier to edit.
-static const int kMaxHandValuesMapSize = 7*10000000;  // 10000000 --> 0.3% of board, card pairs.
-static const float kPercentBoardsVisit = 1.1; // 0.2; // 0.2 // Set to 1.0+ to visit all. Linear impact on runtime. No effect on memory.
+static const long kMaxHandValuesMapSize = 2*10000000;  // 10000000 --> 0.3% of board, card pairs.
+static const float kPercentBoardsVisit = 1.01; // 1.1; // 0.2; // 0.2 // Set to 1.0+ to visit all. Linear impact on runtime. No effect on memory.
 
 // Useful for keeping hand lookups in memory. Maps from full hand (in specific, canonical form, to value (float)
 typedef unordered_map<unsigned long, float> hand_value_map;
@@ -277,21 +277,14 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
 
   // hack, if we want detailed debug for X number of boards
   bool debug = false;
-  unsigned int max_boards = 10000000;
+  //unsigned int max_boards = 10000000;
   clock_t begin = clock(); // Allow us to measure how long it takes.
 
   // We want to build a map of <hand_code> to value.
   // See how big and how fast... until we runs out of memory
-  int hand_map_max_size = kMaxHandValuesMapSize;  // 10000000; // A hack. If we know size, reserve it right away
+  long hand_map_max_size = kMaxHandValuesMapSize;  // 10000000; // A hack. If we know size, reserve it right away
   //unordered_map <unsigned int, float> hand_map;
   hand_map.reserve(hand_map_max_size); 
-
-  // Counts, for debug
-  //unsigned long hands_seen = 0;
-  //unsigned long hands_non_canon = 0;
-  //unsigned long hands_canon = 0;
-  //unsigned long hands_pushed = 0;
-  
 
   // With what probability, to include each event?
   srand((unsigned int)time(NULL));
@@ -382,62 +375,179 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
 
 // Given map of <code> -> (average, count), return average-value bounds that create approx equal sized num_buckets
 // (can assume that all average values [0.0, 1.0]
-static void BucketCutoffsFromCounts(hand_average_value_map& hand_averages, const int num_buckets, vector<float>& bucket_cutoffs, 
+static void BucketCutoffsFromCounts(hand_average_value_map& hand_averages, // code -> pair(average, count)
+				    const int level, // 0 = pre, 1 = flop, etc
+				    const int num_buckets, // branching per level. The X in CFR_X
+				    // assigments for known buckets [all streets so far]
+				    unordered_map<unsigned long, pair<unsigned int, float> >& bucket_assignments,
+				    // Quick lookup of parents, from code to code
+				    unordered_map< unsigned long, unsigned long> flop_parent_code,
+				    unordered_map< unsigned long, unsigned long> turn_parent_code,
+				    // The rest is optional, for debugging cases (show cards). Save memory by not using these (don't build)
 				    unordered_map< unsigned long, pair<Card, Card> >& preflop_key,
-				    unordered_map<unsigned long, unsigned int>& preflop_bucket_assignments) {
-  // dump all the counts in a vector, then sort it
-  vector< pair<pair<float, long>, unsigned long > > hand_counts;
-  long total_hands_count = 0;
-  for (hand_average_value_map::iterator hands_iter = hand_averages.begin(); hands_iter != hand_averages.end(); ++hands_iter) {
-    hand_counts.push_back(make_pair(hands_iter->second, hands_iter->first));
-    total_hands_count += hands_iter->second.second;
+				    unordered_map< unsigned long ,pair<pair<Card, Card>, tuple<Card, Card, Card> > >& flop_key,
+				    unordered_map< unsigned long ,pair<pair<Card, Card>, tuple<Card, Card, Card, Card> > >& turn_key
+				    ) {
+  // Based on level we're examining, what are parent buckets?
+  vector<unsigned int> parent_buckets;
+  if (level == 0) {
+    parent_buckets.push_back(0);
+  } else if (level == 1) {
+    // 1 - 5 
+    for (int i = 1; i < num_buckets + 1; i++) {
+      parent_buckets.push_back(i);
+    }
+  } else if (level == 2) {
+    // 11 - 55
+    for (int i = 1; i < num_buckets + 1; i++) {
+      for (int j = 1; j < num_buckets + 1; j++) {
+	parent_buckets.push_back(10*i + j);
+      }
+    }
+  } else if (level == 3) {
+    // 111 - 555
+    for (int i = 1; i < num_buckets + 1; i++) {
+      for (int j = 1; j < num_buckets + 1; j++) {
+	for (int k = 1; j < num_buckets + 1; k++) {
+	  parent_buckets.push_back(100*i + 10*j + k);
+	}
+      }
+    }
+  } else {
+    printf("ERRROR. Unknown level %d", level);
+    exit(-1);
   }
-  sort(hand_counts.begin(), hand_counts.end()); // can we get away with default sort?
 
-  // Now iterate through the vector, and pump when we hit a bucket break.
-  long running_count = 0;
-  //float breaks[num_buckets+1];
+  // debug: what "prior round" buckets are we going to bucket for? [print the array]
 
-  // To keep overloading... also save buckets. Format: 
+  // Also save buckets to Disk. Format: 
   // xxx -- num buckets xxx -- num items (that will be written out)
   char buf[500];
-  sprintf(buf, "%s/buckets.holdem.preflop.2.0.9", g_data_root);
+  if (level == 0) {
+    sprintf(buf, "%s/buckets.holdem.preflop.2.0.8", g_data_root);
+  } else if (level == 1) {
+    sprintf(buf, "%s/buckets.holdem.flop.2.0.8", g_data_root);
+  } else if (level == 2) {
+    sprintf(buf, "%s/buckets.holdem.turn.2.0.8", g_data_root);
+  } else if (level == 3) {
+    sprintf(buf, "%s/buckets.holdem.river.2.0.8", g_data_root);
+  } else {
+    // default, will never happen (we kill program above)
+    sprintf(buf, "%s/buckets.holdem.river.2.0.9", g_data_root);
+  }
   Writer writer(buf);
 
   // How many buckets, and how many outputs?
   writer.WriteUnsignedInt(num_buckets);
   writer.WriteUnsignedLong(hand_averages.size());
+    
+  // Now, loop over inputs for each parent bucket. Efficient? Maybe not. But no big differnce for small-ish bucket factor.
+  for (vector<unsigned int>::iterator parent_buckets_iter = parent_buckets.begin(); parent_buckets_iter != parent_buckets.end(); ++parent_buckets_iter) {
+    unsigned int parent_bucket = *parent_buckets_iter;
 
-  for(vector< pair<pair<float, long>, unsigned long > >::iterator it = hand_counts.begin(); it != hand_counts.end(); ++it) {
-    float val = it->first.first;
-    long count = it->first.second;
-    unsigned long hand_code = it->second;
-    Card hi = preflop_key[hand_code].first;
-    Card lo = preflop_key[hand_code].second;
-    running_count += count;
-    int segment = min((int)((running_count * num_buckets) / total_hands_count + 1), num_buckets);
-    OutputTwoCards(hi, lo);
-    printf("\t%d/%d - (%.4f, %lu)\n", segment, num_buckets, val, count);
-    //breaks[segment] = val;
-    bucket_cutoffs[segment] = val;
+    printf("\n~> Examinging parent (bucket %d) for level %d", parent_bucket, level);
+    
+    // Now, loop over all inputs... check if these belong to the parent bucket in question.
 
-    // For each item, write
-    // Cards
-    writer.WriteUnsignedChar(hi);
-    writer.WriteUnsignedChar(lo);
-    // value
-    writer.WriteFloat(val);
-    // bucket number
-    writer.WriteUnsignedInt(segment);
+    // dump all the counts in a vector, then sort it
+    vector< pair<pair<float, long>, unsigned long > > hand_counts;
+    long total_hands_count = 0;
+    for (hand_average_value_map::iterator hands_iter = hand_averages.begin(); hands_iter != hand_averages.end(); ++hands_iter) {
+      // Check if current hand belongs in the current parent bucket?
+      unsigned long hand_code = hands_iter->first;
+      unsigned long parent_code;
+      if (level == 0) {
+	// all hands belong preflop
+	// If we made it so far, add to the vector.
+	hand_counts.push_back(make_pair(hands_iter->second, hands_iter->first));
+	total_hands_count += hands_iter->second.second;
+	continue;
+      } else if (level == 1) {
+	parent_code = flop_parent_code[hand_code];
+	if (parent_code == 0) {
+	  printf("Error! Missing preflop code for hand.");
+	  exit(-1);
+	}
+      } else if (level == 2) {
+	parent_code = turn_parent_code[hand_code];
+	if (parent_code == 0) {
+	  printf("Error! Missing preflop code for hand.");
+	  exit(-1);
+	}
+      } else if (level == 3) {
+	// not yet implemented
+	exit(-1);
+      }
 
-    // And update the value in bucket assignments (useful for next level)
-    preflop_bucket_assignments[hand_code] = segment;
+      // Get the parent bucket... and the value associated with that hand.
+      unsigned int this_parent_bucket = bucket_assignments[parent_code].first;
+      float this_parent_value = bucket_assignments[parent_code].second;
+      if (this_parent_bucket == 0) {
+	printf("Error! Cant get parent bucket for hand.");
+      }
+      // Assuming we got bucket correctly... just compare to what we're looking for.
+      if (this_parent_bucket != parent_bucket) {
+	continue;
+      }
+      
+      // If we made it so far, add to the vector.
+      float hand_value = hands_iter->second.first;
+      long hand_count = hands_iter->second.second;
+
+      // If count is small or missing... regress with the parent's average
+      hand_value = (hand_value * hand_count + this_parent_value) / (hand_count + 1);
+      ++hand_count;
+
+      hand_counts.push_back(make_pair(make_pair(hand_value, hand_count), hands_iter->first));
+      total_hands_count += hand_count;
+    }
+    sort(hand_counts.begin(), hand_counts.end()); // can we get away with default sort?
+
+    // Now iterate through the vector, and pump when we hit a bucket break.
+    long running_count = 0;
+    long item_count = 0; // always useufull
+    for(vector< pair<pair<float, long>, unsigned long > >::iterator it = hand_counts.begin(); it != hand_counts.end(); ++it) {
+      ++item_count;
+      float val = it->first.first;
+      long count = it->first.second;
+      unsigned long hand_code = it->second;
+      running_count += count;
+      int segment = min((int)((running_count * num_buckets) / total_hands_count + 1), num_buckets);
+      int true_bucket = parent_bucket * 10 + segment;
+
+      // level-specific debug (preflop, just print the hand, flop... sample down, etc)
+      if (level == 0) {
+	Card hi = preflop_key[hand_code].first;
+	Card lo = preflop_key[hand_code].second;
+	OutputTwoCards(hi, lo);
+	printf("\t%d/%d - (%.4f, %lu)\n", true_bucket, num_buckets, val, count);
+      } else { 
+	if (item_count % 100000) {
+	  printf("\n%lu\t%.4f\t%d", hand_code, val, true_bucket);
+	}
+      }
+
+      // For each item, write
+      // Cards (?)
+      //writer.WriteUnsignedChar(hi);
+      //writer.WriteUnsignedChar(lo);
+      // Code
+      writer.WriteUnsignedLong(hand_code);
+      // value
+      writer.WriteFloat(val);
+      // bucket number
+      writer.WriteUnsignedInt(true_bucket);
+      
+      // Update the value in bucket assignments (critical for next level)
+    
+      // TODO: Alert for collisions. We should *never* have a collision.
+      bucket_assignments[hand_code] = make_pair(true_bucket, val);
+    }
+
+    printf("\nFinished bucketing for parent bucket %d\n0-------------------------\n", parent_bucket);
   }
-  //breaks[-1] = 1.0;
-  bucket_cutoffs[-1] = 1.0;
-  //return breaks;
-
   
+  printf("\nFinished *all* bucketing for %lu items, level %d", parent_buckets.size(), level);
 }
 
 // Loop over all possible boards. Do something. 
@@ -579,12 +689,15 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	    printf("\noriginals: "); OutputSevenCards(raw_cards);
 	  }
 	  turn_seen.insert(turn_code);
-	  turn_key[turn_code] = make_pair(make_pair(canon_turn[0], canon_turn[1]), make_tuple(board[0], board[1], board[2], board[3]));
+	  // Too much space. Skip it.
+	  // turn_key[turn_code] = make_pair(make_pair(canon_turn[0], canon_turn[1]), make_tuple(board[0], board[1], board[2], board[3]));
 	  turn_parent_code[turn_code] = flop_code;
 	  turn_hand_averages[turn_code] = make_pair(0.0, 0);
 	}
 
-
+	// TODO: Finally, compute all of this for full canonical hands.
+	// NOTE: Should probably delete card array lookup (or xOption to remove) when running on full data). 
+	
 
 
       
@@ -638,7 +751,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	    printf("\t updated averge, count to (%.3f, %ld)\n(", preflop_hand_averages[preflop_code].first, preflop_hand_averages[preflop_code].second);
 	    // flop averages
 	    OutputTwoCards(canon_flop[0], canon_flop[1]); printf(")"); OutputThreeCards(board);
-	    printf("\t updated averge, count to (%.3f, %ld)\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second);
+	    printf("\t updated averge, count to (%.3f, %ld)\n(", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second);
 	    // turn averages
 	    OutputTwoCards(canon_turn[0], canon_turn[1]); printf(")"); OutputFourCards(board);
 	    printf("\t updated averge, count to (%.3f, %ld)\n", turn_hand_averages[turn_code].first, turn_hand_averages[turn_code].second);
@@ -674,9 +787,22 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   printf("\n-------\n");
 
   // Turn map of averages... into cutoffs
-  vector<float> bucket_cutoffs(kNumBuckets+1);
-  unordered_map<unsigned long, unsigned int> preflop_bucket_assignments; // For next level, we need code -> bucket
-  BucketCutoffsFromCounts(preflop_hand_averages, kNumBuckets, bucket_cutoffs, preflop_key, preflop_bucket_assignments);
+  //vector<float> bucket_cutoffs(kNumBuckets+1);
+  unordered_map<unsigned long, pair<unsigned int, float> > bucket_assignments; // For next level, we need code -> (bucket, value)
+  //BucketCutoffsFromCounts(preflop_hand_averages, kNumBuckets, bucket_cutoffs, preflop_key, preflop_bucket_assignments);
+
+  // Do bucket assignments, for this level (will also write to disk, and save assignments for next level. 
+  BucketCutoffsFromCounts(preflop_hand_averages, // code -> pair(average, count)
+			  0, // 0 = pre, 1 = flop, etc
+			  kNumBuckets, // branching per level. The X in CFR_X
+			  bucket_assignments, // assigments for known buckets [all streets so far]
+			  // Quick lookup of parents, from code to code
+			  flop_parent_code,
+			  turn_parent_code,
+			  // The rest is optional, for debugging cases (show cards). Save memory by not using these (don't build)
+			  preflop_key,
+			  flop_key,
+			  turn_key);
 
   // Counts for canonical flop hands
   printf("\n-------\n");
@@ -685,22 +811,14 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   long count_flops = 0;
   for (unordered_set<unsigned long>::iterator flop_iter = flop_seen.begin(); flop_iter != flop_seen.end(); ++flop_iter) {
     unsigned long flop_code = *flop_iter;
-    if (count_flops % 10000 == 0) {
-      /*
-      // Compute preflop bucket, via preflop hand.
-      // TODO: Should store this in the map, also...
-      raw_cards[0] = flop_key[flop_code].first.first;
-      raw_cards[1] =  flop_key[flop_code].first.second;
-      CanonicalizeCards(raw_cards, 0, 0, canon_preflop);
-      unsigned long preflop_code = canon_preflop[0] * 60 + canon_preflop[1];
-      unsigned int preflop_bucket = preflop_bucket_assignments[preflop_code];
-      */
-      unsigned int preflop_bucket = preflop_bucket_assignments[flop_parent_code[flop_code]];
+    if (count_flops % 100000 == 0) {
+      unsigned int preflop_bucket = bucket_assignments[flop_parent_code[flop_code]].first;
+      float preflop_value = bucket_assignments[flop_parent_code[flop_code]].second;
 
       // Now print the hand
       OutputTwoCards(flop_key[flop_code].first.first, flop_key[flop_code].first.second); printf("-");
       OutputThreeCards(get<0>(flop_key[flop_code].second), get<1>(flop_key[flop_code].second), get<2>(flop_key[flop_code].second));
-      printf("\t%.3f, %ld [preflop bucket %u]\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second, preflop_bucket);
+      printf("\t%.3f, %ld [preflop bucket %u, val %.3f]\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second, preflop_bucket, preflop_value);
       
     }
     if (flop_hand_averages[flop_code].second == 0) {
@@ -712,7 +830,18 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   printf("\n-------\n");
 
   // TODO: 1.3M Flops --> buckets
-
+  // Do bucket assignments, for this level (will also write to disk, and save assignments for next level. 
+  BucketCutoffsFromCounts(flop_hand_averages, // code -> pair(average, count)
+			  1, // 0 = pre, 1 = flop, etc
+			  kNumBuckets, // branching per level. The X in CFR_X
+			  bucket_assignments, // assigments for known buckets [all streets so far]
+			  // Quick lookup of parents, from code to code
+			  flop_parent_code,
+			  turn_parent_code,
+			  // The rest is optional, for debugging cases (show cards). Save memory by not using these (don't build)
+			  preflop_key,
+			  flop_key,
+			  turn_key);
 
   // Counts for canonical Turn hands
   printf("\n-------\n");
@@ -725,12 +854,15 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
       // TODO: Need buckets from flop
       //unsigned int preturn_bucket = preturn_bucket_assignments[turn_parent_code[turn_code]];
       unsigned long flop_code = turn_parent_code[turn_code];
-      unsigned int preflop_bucket = preflop_bucket_assignments[flop_parent_code[flop_code]];
+      unsigned int preflop_bucket = bucket_assignments[flop_parent_code[flop_code]].first;
+      float preflop_value = bucket_assignments[flop_parent_code[flop_code]].second;
+      unsigned int flop_bucket = bucket_assignments[flop_code].first;
+      float flop_value = bucket_assignments[flop_code].second;
 
       // Now print the hand
-      OutputTwoCards(turn_key[turn_code].first.first, turn_key[turn_code].first.second); printf("-");
-      OutputFourCards(get<0>(turn_key[turn_code].second), get<1>(turn_key[turn_code].second), get<2>(turn_key[turn_code].second), get<3>(turn_key[turn_code].second));
-      printf("\t%.3f, %ld [flop code %lu, preflop bucket %d]\n", turn_hand_averages[turn_code].first, turn_hand_averages[turn_code].second, flop_code, preflop_bucket);
+      //OutputTwoCards(turn_key[turn_code].first.first, turn_key[turn_code].first.second); printf("-");
+      //OutputFourCards(get<0>(turn_key[turn_code].second), get<1>(turn_key[turn_code].second), get<2>(turn_key[turn_code].second), get<3>(turn_key[turn_code].second));
+      printf("\t%.3f, %ld [flop code %lu, flop bucket %d, value %.3f, preflop bucket %d, value %.3f]\n", turn_hand_averages[turn_code].first, turn_hand_averages[turn_code].second, flop_code, flop_bucket, flop_value, preflop_bucket, preflop_value);
       
     }
     if (turn_hand_averages[turn_code].second == 0) {
@@ -740,6 +872,20 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   }
   printf("\nFound %lu canonical turn hands. %lu missing weights", turn_seen.size(), count_missing_turns);
   printf("\n-------\n");
+
+  // Turn buckets -- very ambitious. Will be lots of sparse & missing values.
+  // Do bucket assignments, for this level (will also write to disk, and save assignments for next level. 
+  BucketCutoffsFromCounts(turn_hand_averages, // code -> pair(average, count)
+			  2, // 0 = pre, 1 = flop, etc
+			  kNumBuckets, // branching per level. The X in CFR_X
+			  bucket_assignments, // assigments for known buckets [all streets so far]
+			  // Quick lookup of parents, from code to code
+			  flop_parent_code,
+			  turn_parent_code,
+			  // The rest is optional, for debugging cases (show cards). Save memory by not using these (don't build)
+			  preflop_key,
+			  flop_key,
+			  turn_key);
   
 
   clock_t end = clock();
