@@ -20,7 +20,7 @@
 using namespace std;
 
 // Constants at the top... easier to edit.
-static const int kMaxHandValuesMapSize = 2*10000000;  // 10000000 --> 0.3% of board, card pairs.
+static const int kMaxHandValuesMapSize = 7*10000000;  // 10000000 --> 0.3% of board, card pairs.
 static const float kPercentBoardsVisit = 1.1; // 0.2; // 0.2 // Set to 1.0+ to visit all. Linear impact on runtime. No effect on memory.
 
 // Useful for keeping hand lookups in memory. Maps from full hand (in specific, canonical form, to value (float)
@@ -270,7 +270,10 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
   sprintf(buf, "%s/wins_and_losses.holdem.2.0_full", g_data_root);
   Reader reader(buf);
 
-  unsigned int bd;
+  unsigned int bd; // board number
+
+  // For local canonicalization
+  //Card raw_cards[7], canon_cards[7];
 
   // hack, if we want detailed debug for X number of boards
   bool debug = false;
@@ -282,6 +285,13 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
   int hand_map_max_size = kMaxHandValuesMapSize;  // 10000000; // A hack. If we know size, reserve it right away
   //unordered_map <unsigned int, float> hand_map;
   hand_map.reserve(hand_map_max_size); 
+
+  // Counts, for debug
+  //unsigned long hands_seen = 0;
+  //unsigned long hands_non_canon = 0;
+  //unsigned long hands_canon = 0;
+  //unsigned long hands_pushed = 0;
+  
 
   // With what probability, to include each event?
   srand((unsigned int)time(NULL));
@@ -300,6 +310,9 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
 
     // Boards::Board(max_street, bd, board);
     Card *board = canon_boards[bd];
+    unsigned long code_board = board[0] * 12960000 +
+      board[1] * 216000 + board[2] * 3600 +
+      board[3] * 60 + board[4];
 
     // debug
     if (debug) { 
@@ -314,6 +327,8 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
     // There should now be 990 hands read? Actually... fewer.
     unsigned int read_hands;
     for (read_hands = 0; read_hands < num_hole_card_pairs; ++read_hands) {
+      //++hands_seen;
+
       // Read two cards
       Card hi = reader.ReadUnsignedCharOrDie();
       Card lo = reader.ReadUnsignedCharOrDie();
@@ -329,11 +344,9 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
       // TODO: Put these values in an easy-to-lookup map.
       // But... map from what to what? Ideally, just (hand) -> value.
       // Which means "unordered_map <int, int> m;" if we can encode 7-card hand uniquely in a code.
-      unsigned long code_board = board[0] * 12960000 +
-	board[1] * 216000 + board[2] * 3600 +
-	board[3] * 60 + board[4];
+      
+      // Only use canonical...
       unsigned long code_board_w_hand = code_board * 3600 + hi * 60 + lo;
-
       //if (debug) printf("\tcode_board: %d\tcode_board_w_hand: %d\n", code_board, code_board_w_hand);
 
       // Try a hack. Include hands in the map, with some (small) %.
@@ -362,6 +375,7 @@ static void ReadWinsLosses(Card **canon_boards, unsigned int num_canon_boards, h
     }
   }
 
+  //printf("\nlooked at %ld items. Skipped %ld non-canonical. Saw %ld canonical.", hands_seen, hands_non_canon, hands_canon);
   printf("\nloaded %lu items into the hand, value map", hand_map.size());
   printf("\nFinished reading %d boards", bd);
 }
@@ -431,8 +445,8 @@ static void BucketCutoffsFromCounts(hand_average_value_map& hand_averages, const
 static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards, hand_value_map& hand_map) {
   clock_t begin = clock();
 
-  Card raw_cards[7]; // actual cards
-  Card canon_preflop[2], canon_flop[5], canon_cards[7];  // Various canonicals, for all cards, preflop, flop, etc
+  Card raw_cards[7], canon_cards[7]; // actual cards
+  Card canon_preflop[2], canon_flop[5], canon_turn[6];  // Various canonicals, for all cards, preflop, flop, etc. Separate canonicalizations.
   // Loop over hole cards
 
   // General counts. How hany hands do we visit? How many of those found in hand_map array?
@@ -452,9 +466,17 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   // A. All unqiue (preflop + flop) cases observed (in canonical form)
   unordered_set<unsigned long> flop_seen;
   unordered_map< unsigned long, pair<pair<Card, Card>, tuple<Card, Card, Card> > > flop_key;  
-  unordered_map< unsigned long, unsigned int> flop_super_bucket; // 
+  unordered_map< unsigned long, unsigned long> flop_parent_code; // code --> code for canonical flop hand. [to find parent buckets]
   // B. Running averages for these same codes
   hand_average_value_map flop_hand_averages;
+
+  // Keep going, and compute seen, key, parent_code and averages for canonical turns.
+  // A. All unqiue (preflop + flop) cases observed (in canonical form)
+  unordered_set<unsigned long> turn_seen;
+  unordered_map< unsigned long, pair<pair<Card, Card>, tuple<Card, Card, Card, Card> > > turn_key;  
+  unordered_map< unsigned long, unsigned long> turn_parent_code; // code --> code for canonical flop hand. [to find parent buckets]
+  // B. Running averages for these same codes
+  hand_average_value_map turn_hand_averages;
 
   bool debug = false;
   unsigned int bd;
@@ -480,14 +502,9 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
     // Boards::Board(max_street, bd, board);
     Card *board = canon_boards[bd];
     // Unique codes for whole board, just flop, flop & turn
-    unsigned long code_board = board[0] * 12960000 +
-      board[1] * 216000 + board[2] * 3600 +
-      board[3] * 60 + board[4];
-    unsigned long code_flop = board[0] * 12960000 +
-      board[1] * 216000 + board[2] * 3600;
-    unsigned long code_turn = board[0] * 12960000 +
-      board[1] * 216000 + board[2] * 3600 +
-      board[3] * 60;
+    unsigned long code_board = board[0] * 12960000 + board[1] * 216000 + board[2] * 3600 + board[3] * 60 + board[4];
+    unsigned long code_flop = board[0] * 12960000 + board[1] * 216000 + board[2] * 3600;
+    unsigned long code_turn = board[0] * 12960000 + board[1] * 216000 + board[2] * 3600 + board[3] * 60;
 
     // debug
     if (debug) { 
@@ -504,11 +521,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	raw_cards[1] = lo;
 
 	// Encode the board, in "raw cards" also. For canonicals.
-	raw_cards[2] = board[0];
-	raw_cards[3] = board[1];
-	raw_cards[4] = board[2];
-	raw_cards[5] = board[3];
-	raw_cards[6] = board[4];
+	raw_cards[2] = board[0];raw_cards[3] = board[1];raw_cards[4] = board[2];raw_cards[5] = board[3];raw_cards[6] = board[4];
 
 	// Encode canonical preflops.
 	CanonicalizeCards(raw_cards, 0, 0, canon_preflop);
@@ -521,7 +534,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	  preflop_hand_averages[preflop_code] = make_pair(0.0, 0);
 	}
 
-	// Also, encode canonical flop+pre combination. Why? We want to bucket those also.
+	// Also, encode canonical pre+flop combination. Why? We want to bucket those also.
 	CanonicalizeCards(raw_cards, 0, 1, canon_flop);
 	// Assert that flop is is the same as "board"/flop
 	if (canon_flop[2] == board[0] && canon_flop[3] == board[1] && canon_flop[4] == board[2]) {
@@ -531,11 +544,10 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	  printf("\t("); OutputTwoCards(hi, lo); printf(")\n");
 	  OutputFiveCards(canon_flop);
 	}
-
 	unsigned long flop_code = code_flop * 3600 + canon_flop[0] * 60 + canon_flop[1];
 	if (flop_seen.find(flop_code) == flop_seen.end()) {
 	  // So many outputs... just list 1/10000 [ total]
-	  if (flop_seen.size() % 10000 == 0) {
+	  if (flop_seen.size() % 20000 == 0) {
 	    printf("\nAdding new canonical flop hand (%lu): (", flop_seen.size()); 
 	    OutputTwoCards(canon_flop[0], canon_flop[1]); printf(")");
 	    OutputThreeCards(board);
@@ -543,8 +555,37 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	  }
 	  flop_seen.insert(flop_code);
 	  flop_key[flop_code] = make_pair(make_pair(canon_flop[0], canon_flop[1]), make_tuple(board[0], board[1], board[2]));
+	  flop_parent_code[flop_code] = preflop_code;
 	  flop_hand_averages[flop_code] = make_pair(0.0, 0);
 	}
+
+	// And then, canonicals for pre+flop+turn
+	CanonicalizeCards(raw_cards, 0, 2, canon_turn);
+	// Assert that flop + turn is is the same as "board"/flop
+	if (canon_turn[2] == board[0] && canon_turn[3] == board[1] && canon_turn[4] == board[2] && canon_turn[5] == board[3]) {
+	  // all good
+	} else {
+	  printf("\nError! Mismatch canonalization on turn. Board: "); OutputFiveCards(board);
+	  printf("\t("); OutputTwoCards(hi, lo); printf(")\n");
+	  OutputSixCards(canon_turn);
+	}
+	unsigned long turn_code = code_turn * 3600 + canon_turn[0] * 60 + canon_turn[1];
+	if (turn_seen.find(turn_code) == turn_seen.end()) {
+	  // So many outputs... just list 1/10000 [ total]
+	  if (turn_seen.size() % 1000000 == 0) {
+	    printf("\nAdding new canonical turn hand (%lu): (", turn_seen.size()); 
+	    OutputTwoCards(canon_turn[0], canon_turn[1]); printf(")");
+	    OutputFourCards(board);
+	    printf("\noriginals: "); OutputSevenCards(raw_cards);
+	  }
+	  turn_seen.insert(turn_code);
+	  turn_key[turn_code] = make_pair(make_pair(canon_turn[0], canon_turn[1]), make_tuple(board[0], board[1], board[2], board[3]));
+	  turn_parent_code[turn_code] = flop_code;
+	  turn_hand_averages[turn_code] = make_pair(0.0, 0);
+	}
+
+
+
 
       
 	// OK, now see if we can evaluate this hand.
@@ -555,17 +596,18 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 
 	// B. calculate code -- use the raw preflop cards, since we encode 0.0-1.0 value for all preflop combinations
 	// TODO: Lookup via canonical representation (equivalent preflop hand)
-	unsigned long code_board_w_hand = code_board * 3600 + hi * 60 + lo;
+	//unsigned long code_board_w_hand = code_board * 3600 + hi * 60 + lo;
 	unsigned long code_board_w_hand_canonical = code_board * 3600 + canon_cards[0] * 60 + canon_cards[1];
 
 	// C. look for value? -- use iter since map already huge... and if we miss, we don't want to add more to it
-	hand_value_map::iterator iter = hand_map.find(code_board_w_hand);
+	//hand_value_map::iterator iter = hand_map.find(code_board_w_hand);
 	hand_value_map::iterator iter_canonical = hand_map.find(code_board_w_hand_canonical);
 	float value = -1.0;
-	if (iter != hand_map.end()) {
-	  count_hits++;
-	  value = iter->second;
-	} else if (iter_canonical != hand_map.end()) {
+	//if (iter != hand_map.end()) {
+	//  count_hits++;
+	//  value = iter->second;
+	//} else 
+	if (iter_canonical != hand_map.end()) {
 	  count_hits++;
 	  value = iter_canonical->second;
 	}
@@ -573,23 +615,33 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
 	// Did we find something?
 	if (value >= 0.0) {
 	  // Update value for the correct preflop canonical!
-	  int preflop_count = preflop_hand_averages[preflop_code].second + 1;
+	  long preflop_count = preflop_hand_averages[preflop_code].second + 1;
 	  float preflop_average = (preflop_hand_averages[preflop_code].first * preflop_hand_averages[preflop_code].second + value) / preflop_count;
 	  preflop_hand_averages[preflop_code] = make_pair(preflop_average, preflop_count);
 
 	  // Similarly, update the flop canonical counts.
-	  int flop_count = flop_hand_averages[flop_code].second + 1;
+	  long flop_count = flop_hand_averages[flop_code].second + 1;
 	  float flop_average = (flop_hand_averages[flop_code].first * flop_hand_averages[flop_code].second + value) / flop_count;
 	  flop_hand_averages[flop_code] = make_pair(flop_average, flop_count);
-	
+
+	  // Update turn canonical counts.
+	  long turn_count = turn_hand_averages[turn_code].second + 1;
+	  float turn_average = (turn_hand_averages[turn_code].first * turn_hand_averages[turn_code].second + value) / turn_count;
+	  turn_hand_averages[turn_code] = make_pair(turn_average, turn_count);
+
 	  if (count_hits % 50000 == 0) {
 	    printf("\ncan:\t(");
 	    OutputTwoCards(hi, lo); printf(")"); OutputFiveCards(board);
 	    printf(" --> found value %.3f for hand\n", value);
+	    // preflop averages
 	    OutputTwoCards(canon_preflop[0], canon_preflop[1]);
-	    printf("\t updated averge, count to (%.3f, %d)\n(", preflop_hand_averages[preflop_code].first, preflop_hand_averages[preflop_code].second);
+	    printf("\t updated averge, count to (%.3f, %ld)\n(", preflop_hand_averages[preflop_code].first, preflop_hand_averages[preflop_code].second);
+	    // flop averages
 	    OutputTwoCards(canon_flop[0], canon_flop[1]); printf(")"); OutputThreeCards(board);
-	    printf("\t updated averge, count to (%.3f, %d)\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second);
+	    printf("\t updated averge, count to (%.3f, %ld)\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second);
+	    // turn averages
+	    OutputTwoCards(canon_turn[0], canon_turn[1]); printf(")"); OutputFourCards(board);
+	    printf("\t updated averge, count to (%.3f, %ld)\n", turn_hand_averages[turn_code].first, turn_hand_averages[turn_code].second);
 	  }
 	} else {
 	  count_misses++;
@@ -613,7 +665,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   for (unordered_set<unsigned long>::iterator preflop_iter = preflop_seen.begin(); preflop_iter != preflop_seen.end(); ++preflop_iter) {
     unsigned long preflop_code = *preflop_iter;
     OutputTwoCards(preflop_key[preflop_code].first, preflop_key[preflop_code].second);
-    printf("\t%.3f, %d\n", preflop_hand_averages[preflop_code].first, preflop_hand_averages[preflop_code].second);
+    printf("\t%.3f, %ld\n", preflop_hand_averages[preflop_code].first, preflop_hand_averages[preflop_code].second);
     if (preflop_hand_averages[preflop_code].second == 0) {
       ++count_missing_preflop;
     }
@@ -634,6 +686,7 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   for (unordered_set<unsigned long>::iterator flop_iter = flop_seen.begin(); flop_iter != flop_seen.end(); ++flop_iter) {
     unsigned long flop_code = *flop_iter;
     if (count_flops % 10000 == 0) {
+      /*
       // Compute preflop bucket, via preflop hand.
       // TODO: Should store this in the map, also...
       raw_cards[0] = flop_key[flop_code].first.first;
@@ -641,11 +694,13 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
       CanonicalizeCards(raw_cards, 0, 0, canon_preflop);
       unsigned long preflop_code = canon_preflop[0] * 60 + canon_preflop[1];
       unsigned int preflop_bucket = preflop_bucket_assignments[preflop_code];
+      */
+      unsigned int preflop_bucket = preflop_bucket_assignments[flop_parent_code[flop_code]];
 
       // Now print the hand
       OutputTwoCards(flop_key[flop_code].first.first, flop_key[flop_code].first.second); printf("-");
       OutputThreeCards(get<0>(flop_key[flop_code].second), get<1>(flop_key[flop_code].second), get<2>(flop_key[flop_code].second));
-      printf("\t%.3f, %d [preflop bucket %d]\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second, preflop_bucket);
+      printf("\t%.3f, %ld [preflop bucket %u]\n", flop_hand_averages[flop_code].first, flop_hand_averages[flop_code].second, preflop_bucket);
       
     }
     if (flop_hand_averages[flop_code].second == 0) {
@@ -656,11 +711,45 @@ static void LoopOverAllBoards(Card **canon_boards, unsigned int num_canon_boards
   printf("\nFound %lu canonical flop hands. %lu missing weights", flop_seen.size(), count_missing_flops);
   printf("\n-------\n");
 
+  // TODO: 1.3M Flops --> buckets
+
+
+  // Counts for canonical Turn hands
+  printf("\n-------\n");
+  printf("\nFound %lu canonical turn hands. Values for each:\n", turn_seen.size());
+  long count_missing_turns = 0;
+  long count_turns = 0;
+  for (unordered_set<unsigned long>::iterator turn_iter = turn_seen.begin(); turn_iter != turn_seen.end(); ++turn_iter) {
+    unsigned long turn_code = *turn_iter;
+    if (count_turns % 100000 == 0) {
+      // TODO: Need buckets from flop
+      //unsigned int preturn_bucket = preturn_bucket_assignments[turn_parent_code[turn_code]];
+      unsigned long flop_code = turn_parent_code[turn_code];
+      unsigned int preflop_bucket = preflop_bucket_assignments[flop_parent_code[flop_code]];
+
+      // Now print the hand
+      OutputTwoCards(turn_key[turn_code].first.first, turn_key[turn_code].first.second); printf("-");
+      OutputFourCards(get<0>(turn_key[turn_code].second), get<1>(turn_key[turn_code].second), get<2>(turn_key[turn_code].second), get<3>(turn_key[turn_code].second));
+      printf("\t%.3f, %ld [flop code %lu, preflop bucket %d]\n", turn_hand_averages[turn_code].first, turn_hand_averages[turn_code].second, flop_code, preflop_bucket);
+      
+    }
+    if (turn_hand_averages[turn_code].second == 0) {
+      ++count_missing_turns;
+    }
+    ++count_turns;
+  }
+  printf("\nFound %lu canonical turn hands. %lu missing weights", turn_seen.size(), count_missing_turns);
+  printf("\n-------\n");
   
 
   clock_t end = clock();
   double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
   printf("\nTook %.2f seconds (for entire looping)\n", elapsed_secs);
+
+  //delete [] raw_cards;
+  //delete [] canon_preflop;
+  //delete [] canon_flop; 
+  //delete [] canon_cards;
 }
 
 
